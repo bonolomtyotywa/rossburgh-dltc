@@ -1,14 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { db } from '@/lib/firebase';
+import { doc, onSnapshot } from 'firebase/firestore';
 
 type QueueLevel = 'low' | 'medium' | 'high';
 
 const queueConfig = {
   low: {
-    label: 'Low',
     emoji: '🟢',
-    color: 'bg-green-500',
+    label: 'Low Queue',
     textColor: 'text-green-700',
     bgColor: 'bg-green-50',
     borderColor: 'border-green-300',
@@ -16,9 +17,8 @@ const queueConfig = {
     advice: 'Great time to visit! Queues are short right now.',
   },
   medium: {
-    label: 'Medium',
     emoji: '🟡',
-    color: 'bg-yellow-400',
+    label: 'Medium Queue',
     textColor: 'text-yellow-700',
     bgColor: 'bg-yellow-50',
     borderColor: 'border-yellow-300',
@@ -26,9 +26,8 @@ const queueConfig = {
     advice: 'Moderate queues. Arrive early and have documents ready.',
   },
   high: {
-    label: 'High',
     emoji: '🔴',
-    color: 'bg-red-500',
+    label: 'High Queue',
     textColor: 'text-red-700',
     bgColor: 'bg-red-50',
     borderColor: 'border-red-300',
@@ -37,29 +36,55 @@ const queueConfig = {
   },
 };
 
-const reports = [
-  { time: '06:15', level: 'low', comment: 'Arrived early, in and out in 20 mins' },
-  { time: '07:45', level: 'medium', comment: 'Queue was moving but took about an hour' },
-  { time: '09:30', level: 'high', comment: 'Very long queue, arrived at 9 and waited 2.5 hrs' },
-];
+function getAutoQueueLevel(): QueueLevel {
+  const now = new Date();
+  const day = now.getDay();
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+  const time = hour + minute / 60;
+
+  // Closed on weekends
+  if (day === 0 || day === 6) return 'low';
+
+  // Operating hours: 07:30 – 15:30
+  if (time < 6 || time >= 15.5) return 'low';
+  if (time >= 6 && time < 7) return 'low';
+  if (time >= 7 && time < 9) return 'medium';
+  if (time >= 9 && time < 13) return 'high';
+  if (time >= 13 && time < 15.5) return 'medium';
+
+  return 'low';
+}
 
 export default function QueuePage() {
-  const [currentLevel, setCurrentLevel] = useState<QueueLevel>('medium');
-  const [submitted, setSubmitted] = useState(false);
-  const [selectedReport, setSelectedReport] = useState<QueueLevel | null>(null);
+  const [adminLevel, setAdminLevel] = useState<QueueLevel | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [currentTime, setCurrentTime] = useState(new Date());
 
-  const config = queueConfig[currentLevel];
+  // Update clock every minute
+  useEffect(() => {
+    const interval = setInterval(() => setCurrentTime(new Date()), 60000);
+    return () => clearInterval(interval);
+  }, []);
 
-  const handleReport = (level: QueueLevel) => {
-    setSelectedReport(level);
-  };
+  // Listen to admin override from Firestore
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'queue', 'current'), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setAdminLevel(data.adminOverride ? (data.level as QueueLevel) : null);
+        setUpdatedAt(data.updatedAt?.toDate() || null);
+      }
+      setLoading(false);
+    });
+    return () => unsub();
+  }, []);
 
-  const handleSubmit = () => {
-    if (selectedReport) {
-      setCurrentLevel(selectedReport);
-      setSubmitted(true);
-    }
-  };
+  const autoLevel = getAutoQueueLevel();
+  const level = adminLevel ?? autoLevel;
+  const config = queueConfig[level];
+  const isOverridden = adminLevel !== null;
 
   return (
     <main className="max-w-3xl mx-auto px-4 py-12">
@@ -75,100 +100,65 @@ export default function QueuePage() {
         </p>
       </div>
 
-      {/* Current Status Card */}
-      <div className={`rounded-2xl border-2 ${config.borderColor} ${config.bgColor} p-8 text-center mb-8`}>
-        <div className="text-6xl mb-4">{config.emoji}</div>
-        <h2 className={`text-3xl font-black ${config.textColor} mb-2`}>
-          {config.label} Queue
-        </h2>
-        <p className="text-gray-600 text-lg mb-4">
-          Estimated wait: <strong>{config.wait}</strong>
-        </p>
-        <p className={`text-sm font-medium ${config.textColor} bg-white px-4 py-2 rounded-full inline-block`}>
-          {config.advice}
-        </p>
-      </div>
+      {/* Status Card */}
+      {loading ? (
+        <div className="text-center py-16 text-gray-400">Loading queue status...</div>
+      ) : (
+        <div className={`rounded-2xl border-2 ${config.borderColor} ${config.bgColor} p-8 text-center mb-8`}>
+          <div className="text-6xl mb-4">{config.emoji}</div>
+          <h2 className={`text-3xl font-black ${config.textColor} mb-2`}>{config.label}</h2>
+          <p className="text-gray-600 text-lg mb-4">
+            Estimated wait: <strong>{config.wait}</strong>
+          </p>
+          <p className={`text-sm font-medium ${config.textColor} bg-white px-4 py-2 rounded-full inline-block`}>
+            {config.advice}
+          </p>
+          <div className="mt-4 space-y-1">
+            {isOverridden && updatedAt && (
+              <p className="text-xs text-orange-500 font-semibold">
+                ⚡ Admin override active · set at {updatedAt.toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })}
+              </p>
+            )}
+            {!isOverridden && (
+              <p className="text-xs text-gray-400">
+                🤖 Auto-calculated based on time of day
+              </p>
+            )}
+            <p className="text-xs text-gray-400">
+              🕐 Current time: {currentTime.toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Best Times Panel */}
       <div className="bg-white rounded-2xl shadow p-6 mb-8">
-        <h3 className="font-bold text-[#1E3A8A] text-lg mb-4">
-          🕐 Best Times to Visit
-        </h3>
+        <h3 className="font-bold text-[#1E3A8A] text-lg mb-4">🕐 Best Times to Visit</h3>
         <div className="space-y-3">
           {[
-            { time: '06:00 – 07:00', level: 'Quietest', color: 'bg-green-100 text-green-700' },
-            { time: '07:00 – 09:00', level: 'Moderate', color: 'bg-yellow-100 text-yellow-700' },
-            { time: '09:00 – 12:00', level: 'Busiest', color: 'bg-red-100 text-red-700' },
-            { time: '12:00 – 14:00', level: 'Moderate', color: 'bg-yellow-100 text-yellow-700' },
-            { time: '14:00 – 15:30', level: 'Quieter', color: 'bg-green-100 text-green-700' },
-          ].map((slot) => (
-            <div key={slot.time} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl">
-              <span className="font-medium text-gray-700">{slot.time}</span>
-              <span className={`text-xs font-bold px-3 py-1 rounded-full ${slot.color}`}>
-                {slot.level}
-              </span>
+            { time: '06:00 – 07:00', label: 'Quietest', color: 'bg-green-100 text-green-700' },
+            { time: '07:00 – 09:00', label: 'Moderate', color: 'bg-yellow-100 text-yellow-700' },
+            { time: '09:00 – 13:00', label: 'Busy', color: 'bg-orange-100 text-orange-700' },
+            { time: '13:00 – 15:30', label: 'Moderate', color: 'bg-yellow-100 text-yellow-700' },
+            { time: 'After 15:30', label: 'Closed', color: 'bg-gray-100 text-gray-500' },
+          ].map(({ time, label, color }) => (
+            <div key={time} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+              <span className="text-sm text-gray-700">{time}</span>
+              <span className={`text-xs font-bold px-3 py-1 rounded-full ${color}`}>{label}</span>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Report Queue Level */}
-      <div className="bg-white rounded-2xl shadow p-6 mb-8">
-        <h3 className="font-bold text-[#1E3A8A] text-lg mb-2">
-          📢 Report Current Queue Level
-        </h3>
-        <p className="text-gray-500 text-sm mb-4">
-          Are you at the centre right now? Help others by reporting what you see.
-        </p>
-
-        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-          {(Object.keys(queueConfig) as QueueLevel[]).map((level) => (
-            <button
-              key={level}
-              onClick={() => handleReport(level)}
-              className={`p-4 rounded-xl border-2 font-bold text-sm transition ${
-                selectedReport === level
-                  ? 'border-[#1E3A8A] bg-[#1E3A8A] text-white'
-                  : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-[#1E3A8A]'
-              }`}
-            >
-              <div className="text-2xl mb-1">{queueConfig[level].emoji}</div>
-              {queueConfig[level].label}
-            </button>
-          ))}
-        </div>
-
-        {selectedReport && !submitted && (
-          <button
-            onClick={handleSubmit}
-            className="mt-4 w-full bg-[#1E3A8A] text-white font-bold py-3 rounded-xl hover:bg-blue-800 transition"
-          >
-            Submit Report
-          </button>
-        )}
-
-        {submitted && (
-          <div className="mt-4 bg-green-50 border border-green-300 text-green-700 text-sm font-medium p-4 rounded-xl text-center">
-            ✅ Thank you! Your queue report has been submitted.
-          </div>
-        )}
-      </div>
-
-      {/* Recent Reports */}
-      <div className="bg-white rounded-2xl shadow p-6">
-        <h3 className="font-bold text-[#1E3A8A] text-lg mb-4">
-          🕓 Recent Reports Today
-        </h3>
-        <ul className="space-y-3">
-          {reports.map((r, i) => (
-            <li key={i} className="flex items-start gap-3 p-3 bg-gray-50 rounded-xl">
-              <span className="text-xl">{queueConfig[r.level as QueueLevel].emoji}</span>
-              <div>
-                <div className="text-xs text-gray-400 font-medium">{r.time}</div>
-                <div className="text-sm text-gray-700">{r.comment}</div>
-              </div>
-            </li>
-          ))}
+      {/* Tips */}
+      <div className="bg-[#1E3A8A] text-white rounded-2xl p-6">
+        <h3 className="font-bold text-lg mb-3">💡 Tips to Save Time</h3>
+        <ul className="space-y-2 text-sm text-blue-100">
+          <li>✅ Arrive before 07:00 for shortest queues</li>
+          <li>✅ Have all documents ready before joining the queue</li>
+          <li>✅ Bring exact change or a bank card for fees</li>
+          <li>✅ Check Live Updates before leaving home</li>
+          <li>⚠️ Avoid month-end periods — queues are much longer</li>
         </ul>
       </div>
 
